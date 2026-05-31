@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/terrain/terrain_generator.gd" id="1_terrain"]
+
+[node name="Main" type="Node2D"]
+
+[node name="Terrain" type="StaticBody2D" parent="."]
+script = ExtResource("1_terrain")
