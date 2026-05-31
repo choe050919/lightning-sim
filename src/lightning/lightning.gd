@@ -38,6 +38,8 @@ enum Phase { IDLE, GROWING, FADING }
 
 @export_group("Render")
 @export var bolt_color := Color(0.75, 0.85, 1.0)
+## 코어 밝기 배수. 1을 넘으면 HDR로 글로우가 번진다. (굵기는 글로우가 만든다)
+@export var brightness := 3.0
 @export var bolt_width := 2.0
 ## 한 프레임에 드러낼 선분 수(성장 애니메이션 속도).
 @export var reveal_per_frame := 8
@@ -235,9 +237,10 @@ func _process(delta: float) -> void:
 func _draw() -> void:
 	if _seg_b.is_empty():
 		return
-	var col := bolt_color
+	# 가는 코어를 HDR(밝기>1)로 그려 WorldEnvironment 글로우가 굵기를 만들게 한다.
+	var col := Color(bolt_color.r * brightness, bolt_color.g * brightness, bolt_color.b * brightness, 1.0)
 	if _phase == Phase.FADING:
-		col.a *= _fade
+		col.a = _fade
 	var count := mini(_revealed, _seg_b.size())
 	for k in count:
 		draw_line(_cell_center(_seg_a[k]), _cell_center(_seg_b[k]), col, bolt_width)
