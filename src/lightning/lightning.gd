@@ -5,7 +5,7 @@ extends Node2D
 ## 격자에서 ∇²φ=0 을 SOR로 풀어 전위장을 구하고,
 ## 채널에 인접한 빈 셀들을 p ∝ φ^η 확률로 하나씩 추가해 가지를 키운다.
 ##   - 채널/시작점(구름) = φ=0,  도착 경계(지형 표면 아래) = φ=1
-##   - strike() 한 번에 전체 경로를 계산한 뒤, 성장 순서대로 그리며 애니메이션.
+##   - strike()는 격자만 세팅하고, _process에서 프레임마다 조금씩 성장시킨다(실시간 리더).
 ##
 ## 좌클릭 → 클릭한 x 위치 상단에서 방전 시작.
 
@@ -23,8 +23,8 @@ enum Phase { IDLE, GROWING, FADING }
 @export_group("Growth")
 ## 격자 셀 크기(px). 작을수록 디테일↑·계산량↑.
 @export_range(4.0, 48.0, 1.0) var cell_size := 16.0
-## 성장 지수 η. 1≈잔가지 많고 뭉툭, 2~4≈필라멘트/직선적(번개다움).
-@export_range(0.0, 6.0, 0.1) var eta := 2.0
+## 성장 지수 η. 낮으면 잔가지 많고 뭉툭, 높을수록 끝단 집중·직선적. 4 근처가 번개다움.
+@export_range(0.0, 6.0, 0.1) var eta := 4.0
 ## 안전용 최대 성장 스텝 수.
 @export var max_growth_steps := 2000
 
@@ -45,12 +45,16 @@ enum Phase { IDLE, GROWING, FADING }
 @export_range(0.0, 1.0) var branch_brightness := 0.35
 ## 곁가지 굵기 배수(bolt_width 기준).
 @export_range(0.0, 1.0) var branch_width := 0.5
+## 성장 중 리더 밝기 배수(1=풀 밝기 균일 리더, 낮을수록 리더는 희미하고 지면 도달 때 주채널이 번쩍).
+@export_range(0.0, 1.0) var leader_brightness := 0.45
 ## 노드를 셀 안에서 무작위로 흔드는 정도(0=격자 정렬, 1=±반 셀). 격자 계단을 깨 유기적으로.
 @export_range(0.0, 1.0) var jitter := 0.6
-## 한 프레임에 드러낼 선분 수(성장 애니메이션 속도).
-@export var reveal_per_frame := 8
+## 한 프레임에 진행할 성장 스텝 수(번개가 자라는 속도). 크면 더 빠르게(번쩍).
+@export var steps_per_frame := 6
 ## 완전히 드러난 뒤 사라지는 데 걸리는 시간(초).
 @export var fade_time := 0.6
+## 지면 도달 후 귀환뇌격 전환(주채널 번쩍·곁가지 정착)에 걸리는 시간(초).
+@export var settle_time := 0.12
 
 var _gw := 0
 var _gh := 0
@@ -65,8 +69,9 @@ var _main := {} # 주채널 셀 idx -> true
 var _jitter := {} # 셀 idx -> 무작위 오프셋(Vector2)
 
 var _phase := Phase.IDLE
-var _revealed := 0
 var _fade := 1.0
+var _steps := 0 # 누적 성장 스텝(상한 체크용)
+var _struck := 0.0 # 귀환뇌격 전환 정도(0=성장 중 리더, 1=주채널 번쩍 완료)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
@@ -86,16 +91,10 @@ func strike(source_x: float) -> void:
 	_seg_a = PackedInt32Array()
 	_seg_b = PackedInt32Array()
 	_strike_idx = -1
-	var steps := 0
-	while steps < max_growth_steps:
-		if not _grow_one():
-			break
-		for _i in solve_iterations_per_step:
-			_sor_sweep()
-		steps += 1
-	_trace_main()
-	_build_jitter()
-	_revealed = 0
+	_main = {}
+	_jitter = {}
+	_steps = 0
+	_struck = 0.0
 	_fade = 1.0
 	_phase = Phase.GROWING
 	queue_redraw()
@@ -201,6 +200,8 @@ func _grow_one() -> bool:
 		parent = chosen
 	_seg_a.append(parent)
 	_seg_b.append(chosen)
+	_ensure_jitter(parent)
+	_ensure_jitter(chosen)
 	if hit_target:
 		_strike_idx = chosen
 	return not hit_target
@@ -253,30 +254,21 @@ func _node_pos(idx: int) -> Vector2:
 	var off: Vector2 = _jitter.get(idx, Vector2.ZERO)
 	return _cell_center(idx) + off
 
-## 경로의 각 노드에 셀 안 무작위 오프셋을 한 번 배정한다(같은 노드는 한 오프셋 → 연결 유지).
-func _build_jitter() -> void:
-	_jitter = {}
-	var h := jitter * cell_size * 0.5
-	if h <= 0.0:
+## 노드에 셀 안 무작위 오프셋을 한 번 배정한다(없을 때만 → 연결 유지·성장 중 위치 고정).
+func _ensure_jitter(idx: int) -> void:
+	if _jitter.has(idx):
 		return
-	for k in _seg_b.size():
-		var a := _seg_a[k]
-		var b := _seg_b[k]
-		if not _jitter.has(a):
-			_jitter[a] = Vector2(randf_range(-h, h), randf_range(-h, h))
-		if not _jitter.has(b):
-			_jitter[b] = Vector2(randf_range(-h, h), randf_range(-h, h))
+	var h := jitter * cell_size * 0.5
+	_jitter[idx] = Vector2(randf_range(-h, h), randf_range(-h, h)) if h > 0.0 else Vector2.ZERO
 
 # --- 애니메이션 / 렌더 --------------------------------------------------------
 
 func _process(delta: float) -> void:
 	if _phase == Phase.GROWING:
-		_revealed += reveal_per_frame
-		if _revealed >= _seg_b.size():
-			_revealed = _seg_b.size()
-			_phase = Phase.FADING
+		_grow_step()
 		queue_redraw()
 	elif _phase == Phase.FADING:
+		_struck = minf(1.0, _struck + delta / maxf(settle_time, 0.001))
 		_fade -= delta / maxf(fade_time, 0.01)
 		if _fade <= 0.0:
 			_fade = 0.0
@@ -285,8 +277,20 @@ func _process(delta: float) -> void:
 			_seg_b = PackedInt32Array()
 			_main = {}
 			_jitter = {}
-			_revealed = 0
+			_struck = 0.0
 		queue_redraw()
+
+## 한 프레임 분량(steps_per_frame)만큼 성장시킨다. 끝나면 주채널 추적 후 FADING.
+func _grow_step() -> void:
+	for _i in steps_per_frame:
+		if _steps >= max_growth_steps or not _grow_one():
+			_trace_main()
+			_phase = Phase.FADING
+			_fade = 1.0
+			return
+		_steps += 1
+		for _j in solve_iterations_per_step:
+			_sor_sweep()
 
 func _draw() -> void:
 	if _seg_b.is_empty():
@@ -294,12 +298,14 @@ func _draw() -> void:
 	# 코어를 HDR(밝기>1)로 그려 글로우가 굵기를 만들게 한다.
 	# 주채널은 밝고 굵게, 곁가지는 어둡고 가늘게.
 	var a := _fade if _phase == Phase.FADING else 1.0
-	var main_col := Color(bolt_color.r * brightness, bolt_color.g * brightness, bolt_color.b * brightness, a)
-	var bb := brightness * branch_brightness
-	var branch_col := Color(bolt_color.r * bb, bolt_color.g * bb, bolt_color.b * bb, a)
-	var branch_w := bolt_width * branch_width
-	var count := mini(_revealed, _seg_b.size())
-	for k in count:
+	# 성장 중(_struck=0)엔 주채널·곁가지 모두 leader_brightness로 희미하게(리더),
+	# 지면 도달 후 _struck가 차오르며 주채널은 풀 밝기로 번쩍, 곁가지는 branch_brightness로 정착.
+	var main_f := brightness * lerpf(leader_brightness, 1.0, _struck)
+	var branch_f := brightness * lerpf(leader_brightness, branch_brightness, _struck)
+	var main_col := Color(bolt_color.r * main_f, bolt_color.g * main_f, bolt_color.b * main_f, a)
+	var branch_col := Color(bolt_color.r * branch_f, bolt_color.g * branch_f, bolt_color.b * branch_f, a)
+	var branch_w := bolt_width * lerpf(1.0, branch_width, _struck)
+	for k in _seg_b.size():
 		if _main.has(_seg_b[k]):
 			draw_line(_node_pos(_seg_a[k]), _node_pos(_seg_b[k]), main_col, bolt_width, true)
 		else:
