@@ -41,6 +41,12 @@ enum Phase { IDLE, GROWING, FADING }
 ## 코어 밝기 배수. 1을 넘으면 HDR로 글로우가 번진다. (굵기는 글로우가 만든다)
 @export var brightness := 3.0
 @export var bolt_width := 2.0
+## 곁가지(주채널 외) 밝기 배수. 주채널이 도드라지도록 낮춘다.
+@export_range(0.0, 1.0) var branch_brightness := 0.35
+## 곁가지 굵기 배수(bolt_width 기준).
+@export_range(0.0, 1.0) var branch_width := 0.5
+## 노드를 셀 안에서 무작위로 흔드는 정도(0=격자 정렬, 1=±반 셀). 격자 계단을 깨 유기적으로.
+@export_range(0.0, 1.0) var jitter := 0.6
 ## 한 프레임에 드러낼 선분 수(성장 애니메이션 속도).
 @export var reveal_per_frame := 8
 ## 완전히 드러난 뒤 사라지는 데 걸리는 시간(초).
@@ -53,6 +59,10 @@ var _state := PackedByteArray()
 var _cand := {} # 후보 셀 idx -> true
 var _seg_a := PackedInt32Array() # 선분 부모 idx
 var _seg_b := PackedInt32Array() # 선분 자식 idx
+var _seed_idx := -1 # 시작 셀(구름)
+var _strike_idx := -1 # 지면에 닿은 셀(명중점)
+var _main := {} # 주채널 셀 idx -> true
+var _jitter := {} # 셀 idx -> 무작위 오프셋(Vector2)
 
 var _phase := Phase.IDLE
 var _revealed := 0
@@ -69,12 +79,13 @@ func _unhandled_input(event: InputEvent) -> void:
 ## 상단 source_x(px)에서 시작해 지형에 닿을 때까지 방전 경로를 계산하고
 ## 성장 애니메이션을 시작한다.
 func strike(source_x: float) -> void:
-	var seed_idx := _build_grid(source_x)
+	_seed_idx = _build_grid(source_x)
 	for _i in solve_iterations_initial:
 		_sor_sweep()
-	_seed_candidates(seed_idx)
+	_seed_candidates(_seed_idx)
 	_seg_a = PackedInt32Array()
 	_seg_b = PackedInt32Array()
+	_strike_idx = -1
 	var steps := 0
 	while steps < max_growth_steps:
 		if not _grow_one():
@@ -82,6 +93,8 @@ func strike(source_x: float) -> void:
 		for _i in solve_iterations_per_step:
 			_sor_sweep()
 		steps += 1
+	_trace_main()
+	_build_jitter()
 	_revealed = 0
 	_fade = 1.0
 	_phase = Phase.GROWING
@@ -188,7 +201,27 @@ func _grow_one() -> bool:
 		parent = chosen
 	_seg_a.append(parent)
 	_seg_b.append(chosen)
+	if hit_target:
+		_strike_idx = chosen
 	return not hit_target
+
+## 명중점에서 부모를 따라 구름까지 역추적해 주채널 셀 집합을 구한다.
+func _trace_main() -> void:
+	_main = {}
+	if _seg_b.is_empty():
+		return
+	var parent_of := {}
+	for k in _seg_b.size():
+		parent_of[_seg_b[k]] = _seg_a[k]
+	# 명중점이 없으면(지면 미도달) 마지막 추가 셀을 시작점으로 사용.
+	var cur := _strike_idx if _strike_idx != -1 else _seg_b[_seg_b.size() - 1]
+	var guard := 0
+	while cur != -1 and not _main.has(cur) and guard < 1000000:
+		_main[cur] = true
+		if cur == _seed_idx:
+			break
+		cur = int(parent_of.get(cur, -1))
+		guard += 1
 
 # --- 격자 헬퍼 ---------------------------------------------------------------
 
@@ -215,6 +248,25 @@ func _cell_center(idx: int) -> Vector2:
 	var c := _idx_to_cell(idx)
 	return Vector2((c.x + 0.5) * cell_size, (c.y + 0.5) * cell_size)
 
+## 격자 중심 + 무작위 오프셋. 격자 계단형을 깨서 유기적인 경로를 만든다.
+func _node_pos(idx: int) -> Vector2:
+	var off: Vector2 = _jitter.get(idx, Vector2.ZERO)
+	return _cell_center(idx) + off
+
+## 경로의 각 노드에 셀 안 무작위 오프셋을 한 번 배정한다(같은 노드는 한 오프셋 → 연결 유지).
+func _build_jitter() -> void:
+	_jitter = {}
+	var h := jitter * cell_size * 0.5
+	if h <= 0.0:
+		return
+	for k in _seg_b.size():
+		var a := _seg_a[k]
+		var b := _seg_b[k]
+		if not _jitter.has(a):
+			_jitter[a] = Vector2(randf_range(-h, h), randf_range(-h, h))
+		if not _jitter.has(b):
+			_jitter[b] = Vector2(randf_range(-h, h), randf_range(-h, h))
+
 # --- 애니메이션 / 렌더 --------------------------------------------------------
 
 func _process(delta: float) -> void:
@@ -231,16 +283,24 @@ func _process(delta: float) -> void:
 			_phase = Phase.IDLE
 			_seg_a = PackedInt32Array()
 			_seg_b = PackedInt32Array()
+			_main = {}
+			_jitter = {}
 			_revealed = 0
 		queue_redraw()
 
 func _draw() -> void:
 	if _seg_b.is_empty():
 		return
-	# 가는 코어를 HDR(밝기>1)로 그려 WorldEnvironment 글로우가 굵기를 만들게 한다.
-	var col := Color(bolt_color.r * brightness, bolt_color.g * brightness, bolt_color.b * brightness, 1.0)
-	if _phase == Phase.FADING:
-		col.a = _fade
+	# 코어를 HDR(밝기>1)로 그려 글로우가 굵기를 만들게 한다.
+	# 주채널은 밝고 굵게, 곁가지는 어둡고 가늘게.
+	var a := _fade if _phase == Phase.FADING else 1.0
+	var main_col := Color(bolt_color.r * brightness, bolt_color.g * brightness, bolt_color.b * brightness, a)
+	var bb := brightness * branch_brightness
+	var branch_col := Color(bolt_color.r * bb, bolt_color.g * bb, bolt_color.b * bb, a)
+	var branch_w := bolt_width * branch_width
 	var count := mini(_revealed, _seg_b.size())
 	for k in count:
-		draw_line(_cell_center(_seg_a[k]), _cell_center(_seg_b[k]), col, bolt_width)
+		if _main.has(_seg_b[k]):
+			draw_line(_node_pos(_seg_a[k]), _node_pos(_seg_b[k]), main_col, bolt_width, true)
+		else:
+			draw_line(_node_pos(_seg_a[k]), _node_pos(_seg_b[k]), branch_col, branch_w, true)
