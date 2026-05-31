@@ -1,8 +1,13 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://src/terrain/terrain_generator.gd" id="1_terrain"]
+[ext_resource type="Script" path="res://src/lightning/lightning.gd" id="2_lightning"]
 
 [node name="Main" type="Node2D"]
 
 [node name="Terrain" type="StaticBody2D" parent="."]
 script = ExtResource("1_terrain")
+
+[node name="Lightning" type="Node2D" parent="." node_paths=PackedStringArray("terrain")]
+script = ExtResource("2_lightning")
+terrain = NodePath("../Terrain")
