@@ -23,8 +23,10 @@ enum Phase { IDLE, GROWING, FADING }
 @export_group("Growth")
 ## 격자 셀 크기(px). 작을수록 디테일↑·계산량↑.
 @export_range(4.0, 48.0, 1.0) var cell_size := 16.0
-## 성장 지수 η. 낮으면 잔가지 많고 뭉툭, 높을수록 끝단 집중·직선적. 4 근처가 번개다움.
-@export_range(0.0, 6.0, 0.1) var eta := 4.0
+## 성장 지수 η. 낮으면 잔가지 많고 뭉툭, 높을수록 끝단 집중·직선적.
+@export_range(0.0, 6.0, 0.1) var eta := 2.5
+## 아래쪽 성장 편향. 0=없음(場 따라 봉우리로 잘 휨), 높을수록 곧장 아래로(가지는 깔끔하나 골짜기 직진).
+@export_range(0.0, 2.0, 0.05) var downward_bias := 0.4
 ## 안전용 최대 성장 스텝 수.
 @export var max_growth_steps := 2000
 
@@ -150,7 +152,7 @@ func _seed_candidates(seed_idx: int) -> void:
 	_cand = {}
 	for nb in _neighbors(seed_idx):
 		if _state[nb] == ST_EMPTY:
-			_cand[nb] = true
+			_cand[nb] = seed_idx
 
 ## 후보 하나를 p ∝ φ^η 로 골라 채널에 추가한다. 지형에 닿으면 false.
 func _grow_one() -> bool:
@@ -166,6 +168,16 @@ func _grow_one() -> bool:
 		if p < 0.0:
 			p = 0.0
 		var w := pow(p, eta)
+		# 아래쪽 성장 편향: 아래는 가중↑, 옆은 약하게↓, 위는 강하게↓(가지를 아래로 부챗살).
+		if downward_bias > 0.0:
+			var par: int = _cand[ci]
+			var d := ci - par
+			if d == _gw:
+				w *= 1.0 + downward_bias
+			elif d == -_gw:
+				w *= maxf(0.0, 1.0 - downward_bias * 1.5)
+			else:
+				w *= maxf(0.0, 1.0 - downward_bias * 0.5)
 		weights[k] = w
 		total += w
 	# 룰렛 선택
@@ -195,7 +207,7 @@ func _grow_one() -> bool:
 		elif st == ST_TARGET:
 			hit_target = true
 		elif not _cand.has(nb):
-			_cand[nb] = true
+			_cand[nb] = chosen
 	if parent == -1:
 		parent = chosen
 	_seg_a.append(parent)
