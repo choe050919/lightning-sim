@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://cwvo5ycc5l40r" path="res://src/terrain/terrain_generator.gd" id="1_terrain"]
 [ext_resource type="Script" uid="uid://bo85y34spiyqh" path="res://src/lightning/lightning.gd" id="2_lightning"]
-[ext_resource type="Script" path="res://src/ui/control_panel.gd" id="3_panel"]
+[ext_resource type="Script" uid="uid://bqj75tpy4bwoy" path="res://src/ui/control_panel.gd" id="3_panel"]
 
 [sub_resource type="Environment" id="Environment_glow"]
 background_mode = 3
@@ -26,5 +26,5 @@ script = ExtResource("1_terrain")
 script = ExtResource("2_lightning")
 terrain = NodePath("../Terrain")
 
-[node name="ControlPanel" type="CanvasLayer" parent="."]
+[node name="ControlPanel" type="CanvasLayer" parent="." unique_id=425263777]
 script = ExtResource("3_panel")
