@@ -48,6 +48,9 @@ enum Phase { IDLE, GROWING, FADING }
 @export_range(0.0, 1.0) var branch_brightness := 0.35
 ## 곁가지 굵기 배수(bolt_width 기준).
 @export_range(0.0, 1.0) var branch_width := 0.5
+## 줄기 대비 말단부 굵기 비율(테이퍼 세기). 작을수록 끝으로 갈수록 급히 가늘어진다.
+## 1=테이퍼 없음(균일). 잎 끝은 이 값과 무관하게 항상 점으로 뾰족하게 맺힌다.
+@export_range(0.0, 1.0) var tip_taper := 0.15
 ## 노드를 셀 안에서 무작위로 흔드는 정도(0=격자 정렬, 1=±반 셀). 격자 계단을 깨 유기적으로.
 @export_range(0.0, 1.0) var jitter := 0.6
 ## 한 프레임에 계산할 성장 스텝 수(화면엔 안 그려지는 계산 속도). 클수록 암전이 짧아진다.
@@ -90,6 +93,9 @@ var _ignite_dist := {} # 셀 idx -> 명중점에서 채널을 따라 잰 거리(
 var _max_dist := 0.0 # 가장 먼 셀까지의 채널 거리
 var _return_speed := 0.0 # 파면 속도(px/초) = _max_dist / return_sweep_time
 var _rs_origin := -1 # 귀환뇌격 시작 셀(명중점, 없으면 마지막 끝단)
+var _subtree := {} # 셀 idx -> 하위 트리 크기(자기 포함). 두께 테이퍼 기준(줄기=큼).
+var _max_subtree := 1.0 # 루트(구름)의 하위 트리 크기 = 전체 노드 수
+var _is_leaf := {} # 셀 idx -> true(자식 없는 말단 → 끝을 점으로 맺음)
 var _auto_timer := 0.0 # 다음 자동 낙뢰까지 남은 시간(초)
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -118,6 +124,8 @@ func strike(source_x: float) -> void:
 	_main = {}
 	_jitter = {}
 	_ignite_dist = {}
+	_subtree = {}
+	_is_leaf = {}
 	_rs_origin = -1
 	_steps = 0
 	_rs_t = 0.0
@@ -297,6 +305,62 @@ func _compute_ignite() -> void:
 				_max_dist = nd
 			queue.append(nb)
 
+## 각 셀의 하위 트리 크기(자기 밑에 매달린 셀 수)를 구한다. 두께 테이퍼용:
+## 줄기(아래로 많이 매달림)는 굵고, 갈래·말단으로 갈수록 가늘어진다.
+func _compute_widths() -> void:
+	_subtree = {}
+	_is_leaf = {}
+	_max_subtree = 1.0
+	if _seg_b.is_empty():
+		return
+	# 부모->자식 목록을 만들고 모든 노드를 크기 1로 초기화한다.
+	var parent_of := {}
+	var children := {}
+	for k in _seg_b.size():
+		var a := _seg_a[k]
+		var b := _seg_b[k]
+		parent_of[b] = a
+		if not children.has(a):
+			children[a] = PackedInt32Array()
+		children[a].append(b)
+		_subtree[a] = 1
+		_subtree[b] = 1
+	for n in _subtree:
+		_is_leaf[n] = not children.has(n)
+	# 루트에서 BFS 순서를 만든 뒤, 역순(깊은 것부터)으로 부모에 크기를 누적한다.
+	var root := _seed_idx if _subtree.has(_seed_idx) else _seg_a[0]
+	var order := PackedInt32Array()
+	var seen := {}
+	seen[root] = true
+	var queue := PackedInt32Array([root])
+	var head := 0
+	while head < queue.size():
+		var cur := queue[head]
+		head += 1
+		order.append(cur)
+		for c in children.get(cur, PackedInt32Array()):
+			if seen.has(c):
+				continue
+			seen[c] = true
+			queue.append(c)
+	for i in range(order.size() - 1, -1, -1):
+		var n := order[i]
+		var p := int(parent_of.get(n, -1))
+		if p != -1 and _subtree.has(p):
+			_subtree[p] += _subtree[n]
+	_max_subtree = float(_subtree.get(root, 1))
+
+## 한 노드의 그릴 두께(px). 주채널/곁가지 기본폭에 하위트리 기반 테이퍼를 곱한다.
+## 말단(잎)은 0 → 끝이 점으로 뾰족하게 맺힌다.
+func _node_width(node: int) -> float:
+	if _is_leaf.get(node, false):
+		return 0.0
+	var base_w := bolt_width if _main.has(node) else bolt_width * branch_width
+	var sub := float(_subtree.get(node, 1))
+	# log 정규화로 큰 범위를 완만히 압축(줄기≈1, 가는 가지≈tip_taper).
+	var t := log(1.0 + sub) / log(1.0 + maxf(_max_subtree, 1.0))
+	return base_w * lerpf(tip_taper, 1.0, t)
+
 # --- 격자 헬퍼 ---------------------------------------------------------------
 
 func _idx_to_cell(idx: int) -> Vector2i:
@@ -357,6 +421,8 @@ func _process(delta: float) -> void:
 			_main = {}
 			_jitter = {}
 			_ignite_dist = {}
+			_subtree = {}
+			_is_leaf = {}
 		queue_redraw()
 
 ## 한 프레임 분량(steps_per_frame)만큼 성장시킨다. 끝나면 주채널 추적 후 FADING.
@@ -365,6 +431,7 @@ func _grow_step() -> void:
 		if _steps >= max_growth_steps or not _grow_one():
 			_trace_main()
 			_compute_ignite()
+			_compute_widths()
 			_return_speed = _max_dist / maxf(return_sweep_time, 0.001)
 			_rs_t = 0.0
 			_phase = Phase.FADING
@@ -378,7 +445,7 @@ func _draw() -> void:
 	# 계산 중(GROWING)엔 그리지 않는다 → 짧은 암전. 다 풀린 뒤 귀환뇌격이 드러낸다.
 	if _phase != Phase.FADING or _seg_b.is_empty():
 		return
-	# 코어를 HDR(밝기>1)로 그려 글로우가 굵기를 만들게 한다.
+	# 코어를 HDR(밝기>1)로 그려 글로우가 번지게 한다(굵기는 사다리꼴 폭 + 글로우).
 	# 명중점에서 출발한 파면(front)이 채널 거리를 쓸어 올리며 세그먼트를 드러낸다.
 	# 닿기 전 = 안 보임, 닿는 순간 flash_peak로 과조 후 afterglow_tau로
 	# base(주채널 1.0 / 곁가지 branch_brightness)까지 감쇠하며, 전체는 _fade로 사라진다.
@@ -395,5 +462,15 @@ func _draw() -> void:
 		var flash := exp(-since / maxf(afterglow_tau, 0.001))   # 1 → 0 잔광
 		var fac := brightness * (base + (flash_peak - base) * flash)
 		var col := Color(bolt_color.r * fac, bolt_color.g * fac, bolt_color.b * fac, a)
-		var w := bolt_width if is_main else bolt_width * branch_width
-		draw_line(_node_pos(_seg_a[k]), _node_pos(_seg_b[k]), col, w, true)
+		# 부모→자식 폭이 다른 사다리꼴로 그려 줄기→끝 테이퍼를 만든다(잎 끝은 점 → 뾰족).
+		var pa := _node_pos(_seg_a[k])
+		var pb := _node_pos(child)
+		var seg := pb - pa
+		var seg_len := seg.length()
+		if seg_len < 0.0001:
+			continue
+		var nrm := Vector2(-seg.y, seg.x) / seg_len # 세그먼트 단위 법선
+		var ha := _node_width(_seg_a[k]) * 0.5
+		var hb := _node_width(child) * 0.5
+		var quad := PackedVector2Array([pa + nrm * ha, pb + nrm * hb, pb - nrm * hb, pa - nrm * ha])
+		draw_colored_polygon(quad, col)
