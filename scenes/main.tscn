@@ -1,27 +1,30 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene format=3 uid="uid://3ly4nt1si1t0"]
 
-[ext_resource type="Script" path="res://src/terrain/terrain_generator.gd" id="1_terrain"]
-[ext_resource type="Script" path="res://src/lightning/lightning.gd" id="2_lightning"]
+[ext_resource type="Script" uid="uid://cwvo5ycc5l40r" path="res://src/terrain/terrain_generator.gd" id="1_terrain"]
+[ext_resource type="Script" uid="uid://bo85y34spiyqh" path="res://src/lightning/lightning.gd" id="2_lightning"]
+[ext_resource type="Script" path="res://src/ui/control_panel.gd" id="3_panel"]
 
 [sub_resource type="Environment" id="Environment_glow"]
 background_mode = 3
 glow_enabled = true
-glow_intensity = 0.8
-glow_blend_mode = 0
-glow_hdr_threshold = 1.0
 glow_levels/1 = 1.0
 glow_levels/2 = 1.0
 glow_levels/3 = 0.7
 glow_levels/4 = 0.5
+glow_intensity = 0.8
+glow_blend_mode = 0
 
-[node name="Main" type="Node2D"]
+[node name="Main" type="Node2D" unique_id=1829392423]
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1443991986]
 environment = SubResource("Environment_glow")
 
-[node name="Terrain" type="StaticBody2D" parent="."]
+[node name="Terrain" type="StaticBody2D" parent="." unique_id=986230245]
 script = ExtResource("1_terrain")
 
-[node name="Lightning" type="Node2D" parent="." node_paths=PackedStringArray("terrain")]
+[node name="Lightning" type="Node2D" parent="." unique_id=1023842182 node_paths=PackedStringArray("terrain")]
 script = ExtResource("2_lightning")
 terrain = NodePath("../Terrain")
+
+[node name="ControlPanel" type="CanvasLayer" parent="."]
+script = ExtResource("3_panel")
