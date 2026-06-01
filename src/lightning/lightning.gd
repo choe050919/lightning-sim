@@ -58,6 +58,8 @@ enum Phase { IDLE, GROWING, FADING }
 @export var steps_per_frame := 30
 ## 완전히 드러난 뒤 사라지는 데 걸리는 시간(초).
 @export var fade_time := 0.6
+## 사라질 때 밝기 감쇠 곡선. 클수록 초반에 더 빨리 어두워져 "밝다가 툭 꺼짐"을 줄인다. 1=선형(예전 동작).
+@export_range(1.0, 5.0, 0.1) var fade_gamma := 1.6
 ## 귀환뇌격 파면이 채널 전체를 쓸고 지나가는 시간(초). 작을수록 "번쩍"이 더 순간적.
 @export_range(0.0, 0.5, 0.005) var return_sweep_time := 0.05
 ## 점화된 세그먼트의 잔광 감쇠 시상수(초). 클수록 번쩍인 뒤 더 오래 빛난다.
@@ -450,6 +452,7 @@ func _draw() -> void:
 	# 닿기 전 = 안 보임, 닿는 순간 flash_peak로 과조 후 afterglow_tau로
 	# base(주채널 1.0 / 곁가지 branch_brightness)까지 감쇠하며, 전체는 _fade로 사라진다.
 	var a := _fade
+	var fade_b := pow(_fade, fade_gamma) # 밝기를 비선형으로 깎아 눈부신 구간을 빨리 통과(툭 꺼짐 완화)
 	var front := _rs_t * _return_speed
 	for k in _seg_b.size():
 		var child := _seg_b[k]
@@ -460,7 +463,7 @@ func _draw() -> void:
 		var base := 1.0 if is_main else branch_brightness
 		var since := (front - d) / maxf(_return_speed, 0.001) # 점화 후 경과(초)
 		var flash := exp(-since / maxf(afterglow_tau, 0.001))   # 1 → 0 잔광
-		var fac := brightness * (base + (flash_peak - base) * flash)
+		var fac := brightness * (base + (flash_peak - base) * flash) * fade_b
 		var col := Color(bolt_color.r * fac, bolt_color.g * fac, bolt_color.b * fac, a)
 		# 부모→자식 폭이 다른 사다리꼴로 그려 줄기→끝 테이퍼를 만든다(잎 끝은 점 → 뾰족).
 		var pa := _node_pos(_seg_a[k])
