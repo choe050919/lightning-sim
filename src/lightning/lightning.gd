@@ -7,7 +7,7 @@ extends Node2D
 ##   - 채널/시작점(구름) = φ=0,  도착 경계(지형 표면 아래) = φ=1
 ##   - strike()는 격자만 세팅하고, _process에서 프레임마다 조금씩 성장시킨다(실시간 리더).
 ##
-## 좌클릭 → 클릭한 x 위치 상단에서 방전 시작.
+## 좌클릭 → 클릭한 x 위치 상단에서 방전 시작. A키 → 자동 낙뢰(스톰) 모드 토글.
 
 # 격자 셀 상태.
 const ST_EMPTY := 0
@@ -58,6 +58,14 @@ enum Phase { IDLE, GROWING, FADING }
 ## 지면 도달 후 귀환뇌격 전환(주채널 번쩍·곁가지 정착)에 걸리는 시간(초).
 @export var settle_time := 0.12
 
+@export_group("Auto Strike")
+## 켜면 무작위 위치에 자동으로 번개가 친다(스톰 모드). 실행 중 A키로도 토글.
+@export var auto_strike := false
+## 자동 낙뢰 사이 간격(초)의 최소.
+@export var auto_interval_min := 0.5
+## 자동 낙뢰 사이 간격(초)의 최대. 매 낙뢰마다 [min, max]에서 무작위로 정해진다.
+@export var auto_interval_max := 2.0
+
 var _gw := 0
 var _gh := 0
 var _phi := PackedFloat32Array()
@@ -74,12 +82,18 @@ var _phase := Phase.IDLE
 var _fade := 1.0
 var _steps := 0 # 누적 성장 스텝(상한 체크용)
 var _struck := 0.0 # 귀환뇌격 전환 정도(0=성장 중 리더, 1=주채널 번쩍 완료)
+var _auto_timer := 0.0 # 다음 자동 낙뢰까지 남은 시간(초)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
 			strike(get_global_mouse_position().x)
+	elif event is InputEventKey:
+		var k := event as InputEventKey
+		if k.pressed and not k.echo and k.physical_keycode == KEY_A:
+			auto_strike = not auto_strike
+			print("[lightning] auto_strike=", auto_strike)
 
 # --- DBM 한 방 계산 ----------------------------------------------------------
 
@@ -276,7 +290,13 @@ func _ensure_jitter(idx: int) -> void:
 # --- 애니메이션 / 렌더 --------------------------------------------------------
 
 func _process(delta: float) -> void:
-	if _phase == Phase.GROWING:
+	if _phase == Phase.IDLE:
+		if auto_strike:
+			_auto_timer -= delta
+			if _auto_timer <= 0.0:
+				_auto_timer = randf_range(auto_interval_min, auto_interval_max)
+				strike(randf() * get_viewport_rect().size.x)
+	elif _phase == Phase.GROWING:
 		_grow_step()
 		queue_redraw()
 	elif _phase == Phase.FADING:
