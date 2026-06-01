@@ -56,9 +56,9 @@ enum Phase { IDLE, GROWING, FADING }
 ## 완전히 드러난 뒤 사라지는 데 걸리는 시간(초).
 @export var fade_time := 0.6
 ## 귀환뇌격 파면이 채널 전체를 쓸고 지나가는 시간(초). 작을수록 "번쩍"이 더 순간적.
-@export_range(0.0, 0.5, 0.005) var return_sweep_time := 0.04
+@export_range(0.0, 0.5, 0.005) var return_sweep_time := 0.05
 ## 점화된 세그먼트의 잔광 감쇠 시상수(초). 클수록 번쩍인 뒤 더 오래 빛난다.
-@export_range(0.01, 1.0, 0.01) var afterglow_tau := 0.18
+@export_range(0.01, 1.0, 0.01) var afterglow_tau := 0.10
 ## 점화 순간의 과조(overshoot) 밝기 배수. 1=과조 없음, 클수록 닿는 순간 더 세게 번쩍(블룸).
 @export_range(1.0, 4.0, 0.1) var flash_peak := 1.8
 
