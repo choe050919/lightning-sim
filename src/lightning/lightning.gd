@@ -5,7 +5,8 @@ extends Node2D
 ## 격자에서 ∇²φ=0 을 SOR로 풀어 전위장을 구하고,
 ## 채널에 인접한 빈 셀들을 p ∝ φ^η 확률로 하나씩 추가해 가지를 키운다.
 ##   - 채널/시작점(구름) = φ=0,  도착 경계(지형 표면 아래) = φ=1
-##   - strike()는 격자만 세팅하고, _process에서 프레임마다 조금씩 성장시킨다(실시간 리더).
+##   - 경로는 화면에 안 그리고 프레임에 나눠 계산하며(프리징 방지), 다 풀리면
+##     귀환뇌격 파면이 채널을 쓸어 올리며 번쩍 드러낸다(리더 하강은 표시 안 함).
 ##
 ## 좌클릭 → 클릭한 x 위치 상단에서 방전 시작. A키 → 자동 낙뢰(스톰) 모드 토글.
 
@@ -47,16 +48,19 @@ enum Phase { IDLE, GROWING, FADING }
 @export_range(0.0, 1.0) var branch_brightness := 0.35
 ## 곁가지 굵기 배수(bolt_width 기준).
 @export_range(0.0, 1.0) var branch_width := 0.5
-## 성장 중 리더 밝기 배수(1=풀 밝기 균일 리더, 낮을수록 리더는 희미하고 지면 도달 때 주채널이 번쩍).
-@export_range(0.0, 1.0) var leader_brightness := 0.45
 ## 노드를 셀 안에서 무작위로 흔드는 정도(0=격자 정렬, 1=±반 셀). 격자 계단을 깨 유기적으로.
 @export_range(0.0, 1.0) var jitter := 0.6
-## 한 프레임에 진행할 성장 스텝 수(번개가 자라는 속도). 크면 더 빠르게(번쩍).
-@export var steps_per_frame := 6
+## 한 프레임에 계산할 성장 스텝 수(화면엔 안 그려지는 계산 속도). 클수록 암전이 짧아진다.
+## 너무 크면 한 프레임 SOR 부하로 진짜 끊김이 올 수 있다(그땐 solve_iterations_per_step를 낮춘다).
+@export var steps_per_frame := 30
 ## 완전히 드러난 뒤 사라지는 데 걸리는 시간(초).
 @export var fade_time := 0.6
-## 지면 도달 후 귀환뇌격 전환(주채널 번쩍·곁가지 정착)에 걸리는 시간(초).
-@export var settle_time := 0.12
+## 귀환뇌격 파면이 채널 전체를 쓸고 지나가는 시간(초). 작을수록 "번쩍"이 더 순간적.
+@export_range(0.0, 0.5, 0.005) var return_sweep_time := 0.04
+## 점화된 세그먼트의 잔광 감쇠 시상수(초). 클수록 번쩍인 뒤 더 오래 빛난다.
+@export_range(0.01, 1.0, 0.01) var afterglow_tau := 0.18
+## 점화 순간의 과조(overshoot) 밝기 배수. 1=과조 없음, 클수록 닿는 순간 더 세게 번쩍(블룸).
+@export_range(1.0, 4.0, 0.1) var flash_peak := 1.8
 
 @export_group("Auto Strike")
 ## 켜면 무작위 위치에 자동으로 번개가 친다(스톰 모드). 실행 중 A키로도 토글.
@@ -81,7 +85,11 @@ var _jitter := {} # 셀 idx -> 무작위 오프셋(Vector2)
 var _phase := Phase.IDLE
 var _fade := 1.0
 var _steps := 0 # 누적 성장 스텝(상한 체크용)
-var _struck := 0.0 # 귀환뇌격 전환 정도(0=성장 중 리더, 1=주채널 번쩍 완료)
+var _rs_t := 0.0 # 귀환뇌격 경과 시간(초). FADING 동안 증가하며 파면을 밀어 올린다.
+var _ignite_dist := {} # 셀 idx -> 명중점에서 채널을 따라 잰 거리(점화 순서 결정)
+var _max_dist := 0.0 # 가장 먼 셀까지의 채널 거리
+var _return_speed := 0.0 # 파면 속도(px/초) = _max_dist / return_sweep_time
+var _rs_origin := -1 # 귀환뇌격 시작 셀(명중점, 없으면 마지막 끝단)
 var _auto_timer := 0.0 # 다음 자동 낙뢰까지 남은 시간(초)
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -109,8 +117,10 @@ func strike(source_x: float) -> void:
 	_strike_idx = -1
 	_main = {}
 	_jitter = {}
+	_ignite_dist = {}
+	_rs_origin = -1
 	_steps = 0
-	_struck = 0.0
+	_rs_t = 0.0
 	_fade = 1.0
 	_phase = Phase.GROWING
 	queue_redraw()
@@ -242,6 +252,7 @@ func _trace_main() -> void:
 		parent_of[_seg_b[k]] = _seg_a[k]
 	# 명중점이 없으면(지면 미도달) 마지막 추가 셀을 시작점으로 사용.
 	var cur := _strike_idx if _strike_idx != -1 else _seg_b[_seg_b.size() - 1]
+	_rs_origin = cur
 	var guard := 0
 	while cur != -1 and not _main.has(cur) and guard < 1000000:
 		_main[cur] = true
@@ -249,6 +260,42 @@ func _trace_main() -> void:
 			break
 		cur = int(parent_of.get(cur, -1))
 		guard += 1
+
+## 명중점(_rs_origin)에서 채널을 따라 잰 거리를 모든 셀에 부여한다(귀환뇌격 점화 순서).
+## 파면은 이 거리를 시간에 따라 쓸어 올린다.
+func _compute_ignite() -> void:
+	_ignite_dist = {}
+	_max_dist = 0.0
+	if _seg_b.is_empty() or _rs_origin == -1:
+		return
+	# 세그먼트로 무방향 인접 리스트(트리)를 만든다.
+	var adj := {}
+	for k in _seg_b.size():
+		var a := _seg_a[k]
+		var b := _seg_b[k]
+		if not adj.has(a):
+			adj[a] = PackedInt32Array()
+		if not adj.has(b):
+			adj[b] = PackedInt32Array()
+		adj[a].append(b)
+		adj[b].append(a)
+	# 명중점에서 BFS로 누적 유클리드 거리를 잰다(그리는 위치 _node_pos 기준).
+	var queue := PackedInt32Array([_rs_origin])
+	_ignite_dist[_rs_origin] = 0.0
+	var head := 0
+	while head < queue.size():
+		var cur := queue[head]
+		head += 1
+		var cur_d: float = _ignite_dist[cur]
+		var cur_pos := _node_pos(cur)
+		for nb in adj.get(cur, PackedInt32Array()):
+			if _ignite_dist.has(nb):
+				continue
+			var nd := cur_d + cur_pos.distance_to(_node_pos(nb))
+			_ignite_dist[nb] = nd
+			if nd > _max_dist:
+				_max_dist = nd
+			queue.append(nb)
 
 # --- 격자 헬퍼 ---------------------------------------------------------------
 
@@ -300,7 +347,7 @@ func _process(delta: float) -> void:
 		_grow_step()
 		queue_redraw()
 	elif _phase == Phase.FADING:
-		_struck = minf(1.0, _struck + delta / maxf(settle_time, 0.001))
+		_rs_t += delta
 		_fade -= delta / maxf(fade_time, 0.01)
 		if _fade <= 0.0:
 			_fade = 0.0
@@ -309,7 +356,7 @@ func _process(delta: float) -> void:
 			_seg_b = PackedInt32Array()
 			_main = {}
 			_jitter = {}
-			_struck = 0.0
+			_ignite_dist = {}
 		queue_redraw()
 
 ## 한 프레임 분량(steps_per_frame)만큼 성장시킨다. 끝나면 주채널 추적 후 FADING.
@@ -317,6 +364,9 @@ func _grow_step() -> void:
 	for _i in steps_per_frame:
 		if _steps >= max_growth_steps or not _grow_one():
 			_trace_main()
+			_compute_ignite()
+			_return_speed = _max_dist / maxf(return_sweep_time, 0.001)
+			_rs_t = 0.0
 			_phase = Phase.FADING
 			_fade = 1.0
 			return
@@ -325,20 +375,25 @@ func _grow_step() -> void:
 			_sor_sweep()
 
 func _draw() -> void:
-	if _seg_b.is_empty():
+	# 계산 중(GROWING)엔 그리지 않는다 → 짧은 암전. 다 풀린 뒤 귀환뇌격이 드러낸다.
+	if _phase != Phase.FADING or _seg_b.is_empty():
 		return
 	# 코어를 HDR(밝기>1)로 그려 글로우가 굵기를 만들게 한다.
-	# 주채널은 밝고 굵게, 곁가지는 어둡고 가늘게.
-	var a := _fade if _phase == Phase.FADING else 1.0
-	# 성장 중(_struck=0)엔 주채널·곁가지 모두 leader_brightness로 희미하게(리더),
-	# 지면 도달 후 _struck가 차오르며 주채널은 풀 밝기로 번쩍, 곁가지는 branch_brightness로 정착.
-	var main_f := brightness * lerpf(leader_brightness, 1.0, _struck)
-	var branch_f := brightness * lerpf(leader_brightness, branch_brightness, _struck)
-	var main_col := Color(bolt_color.r * main_f, bolt_color.g * main_f, bolt_color.b * main_f, a)
-	var branch_col := Color(bolt_color.r * branch_f, bolt_color.g * branch_f, bolt_color.b * branch_f, a)
-	var branch_w := bolt_width * lerpf(1.0, branch_width, _struck)
+	# 명중점에서 출발한 파면(front)이 채널 거리를 쓸어 올리며 세그먼트를 드러낸다.
+	# 닿기 전 = 안 보임, 닿는 순간 flash_peak로 과조 후 afterglow_tau로
+	# base(주채널 1.0 / 곁가지 branch_brightness)까지 감쇠하며, 전체는 _fade로 사라진다.
+	var a := _fade
+	var front := _rs_t * _return_speed
 	for k in _seg_b.size():
-		if _main.has(_seg_b[k]):
-			draw_line(_node_pos(_seg_a[k]), _node_pos(_seg_b[k]), main_col, bolt_width, true)
-		else:
-			draw_line(_node_pos(_seg_a[k]), _node_pos(_seg_b[k]), branch_col, branch_w, true)
+		var child := _seg_b[k]
+		var d: float = _ignite_dist.get(child, 0.0)
+		if front < d:
+			continue # 아직 파면 도달 전 → 안 보임
+		var is_main := _main.has(child)
+		var base := 1.0 if is_main else branch_brightness
+		var since := (front - d) / maxf(_return_speed, 0.001) # 점화 후 경과(초)
+		var flash := exp(-since / maxf(afterglow_tau, 0.001))   # 1 → 0 잔광
+		var fac := brightness * (base + (flash_peak - base) * flash)
+		var col := Color(bolt_color.r * fac, bolt_color.g * fac, bolt_color.b * fac, a)
+		var w := bolt_width if is_main else bolt_width * branch_width
+		draw_line(_node_pos(_seg_a[k]), _node_pos(_seg_b[k]), col, w, true)
