@@ -1,3 +1,8 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# 캡처/스크린샷 출력 + 렌더 캡처용 임시 스크립트(소스 아님)
+/captures/
+/_caps/
+/_cap.gd
